@@ -1,0 +1,85 @@
+#!/bin/bash
+
+#gcat (genome cat)
+#Takes any combination of filenames as arguments, intelligently outputs uncompressed bed stream
+
+set -eu -o pipefail
+
+function usage {
+    echo "Usage: gcat FILE...";
+    echo "         Print files, in bed format if possible, to stdout";
+    echo;
+    echo "         Uses the file extension to decide whether to call cat, unstarch, wig2bed, zcat, or sam2bed. Unrecognized file types are passed through";
+    echo "         Uses gunzip as well where necessary.";
+}
+
+if [ $# -eq 0 ]; then
+    usage;
+    exit 1;
+fi
+
+if [ "$1" = "--do-not-sort" ]; then
+    donotsort="--do-not-sort"
+    shift
+else
+    donotsort=""
+fi
+
+while [ $# -ge 1 ]
+do
+    if [[ ! -e $1 && "$1" != "-" ]]; then
+        echo "File \"$1\" does not exist!" > /dev/stderr
+        echo > /dev/stderr;
+        usage > /dev/stderr;
+        exit 2;
+    fi
+    
+    case $1 in
+        #Bob uses the wig extension with a track line but 1-based indexing
+        *.hotspot.twopass.fdr*.merge.wig)
+            thecmd="tail +2 $1";;
+        *.wig.gz | *.wigFix.gz)
+            thecmd="zcat $1 | wig2bed -";;
+        *.wig | *.wigFix)
+            thecmd="wig2bed $1";;
+        *.bw | *.bigWig) thecmd="/home/maurano/bin/bigWigToBedGraph $1 $TMPDIR/gcat.temp && awk 'BEGIN {OFS=\"\t\"} {print \$1,\$2,\$3,\"id-\" NR,\$4}' $TMPDIR/gcat.temp";;
+        *.starch)
+            thecmd="unstarch $1";;
+        *.sam)
+            thecmd="sam2bed ${donotsort} --max-mem 4G < $1";;
+#        *.bam) thecmd="bam2bed ${donotsort} --max-mem 4G < $1";;
+        *.bam) 
+            if [[ -e "$1.bai" ]]; then
+                thecmd="";
+                for chrom in `samtools idxstats $1 | cut -f1 | awk -F "\t" 'BEGIN {OFS="\t"} $1!="*" {print $1, 0, 1}' | sort-bed - | cut -f1`; do
+                     if [[ "$thecmd" != "" ]]; then
+                            thecmd="$thecmd; ";
+                     fi;
+                     thecmd="$thecmd samtools view -h $1 $chrom | sam2bed ${donotsort} --max-mem 4G -";
+                done
+              else
+                     thecmd="bam2bed ${donotsort} --max-mem 4G < $1";
+              fi;;
+        *.bed)
+            if [[ $(head -1 $1 | grep "^track") ]]; then
+                thecmd="tail +2 $1";
+                else
+                    thecmd="cat $1";
+                fi;;
+        *.bed.gz)
+            if [[ $(zcat $1 | head -1 | grep "^track") ]]; then 
+                    thecmd="zcat $1 | tail +2";
+                else
+                    thecmd="zcat $1";
+                fi;;
+        *.gz) thecmd="zcat $1";;
+        *) thecmd="cat $1";;
+    esac
+    
+#   echo "do $thecmd" >> /dev/stderr
+    
+    #execute it
+    eval $thecmd
+    
+    shift
+done
